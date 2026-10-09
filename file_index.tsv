@@ -1,0 +1,32 @@
+original_filename	repository_path	preparation
+00_get_coords.sh	scripts/00_get_coords.sh	unchanged
+00_get_coords_regions.sh	scripts/00_get_coords_regions.sh	unchanged
+01.G21-SG-整合AS和基因.ipynb	analysis/01.G21-SG-整合AS和基因.ipynb	outputs cleared; code unchanged
+01_export_maps.pbs	scripts/01_export_maps.pbs	unchanged
+01_extract_depthV2.sh	scripts/01_extract_depthV2.sh	unchanged
+02_plot_sashimi_junctions.py	scripts/02_plot_sashimi_junctions.py	unchanged
+02_plot_tracksV2.py	scripts/02_plot_tracksV2.py	unchanged
+03_pipeline_G21-4_0515.pbs	scripts/03_pipeline_G21-4_0515.pbs	unchanged
+10_plot_screenshot_candidates_same_y.sh	scripts/10_plot_screenshot_candidates_same_y.sh	unchanged
+Fig4_AS_Network.ipynb	Figure4/Fig4_AS_Network.ipynb	outputs cleared; code unchanged
+Fig4_AS富集分析.ipynb	Figure4/Fig4_AS富集分析.ipynb	outputs cleared; code unchanged
+Fig4_DEGs.ipynb	Figure4/Fig4_DEGs.ipynb	outputs cleared; code unchanged
+Fig4_SG_psi_brain.ipynb	Figure4/Fig4_SG_psi_brain.ipynb	outputs cleared; code unchanged
+Fig4_SG_psi_肾小脑.ipynb	Figure4/Fig4_SG_psi_肾小脑.ipynb	outputs cleared; code unchanged
+G21-4-0515-pe_reconstruct.sh	scripts/G21-4-0515-pe_reconstruct.sh	unchanged
+G21-4-300M_rmats_pe.pbs	scripts/G21-4-300M_rmats_pe.pbs	unchanged
+MAGIC-seq1.RD.sh	scripts/MAGIC-seq1.RD.sh	unchanged
+St_pipeline.sh	scripts/St_pipeline.sh	unchanged
+TABLE1_mm10_v3.txt	data/TABLE1_mm10_v3.txt	unchanged
+append_cb_to_qname.py	scripts/append_cb_to_qname.py	unchanged
+build_transcript_junction_index.py	scripts/build_transcript_junction_index.py	unchanged
+collect_editing_sites_adapted.py	scripts/collect_editing_sites_adapted.py	unchanged
+export_spatial_maps.py	scripts/export_spatial_maps.py	unchanged
+generate_match_transcript_qsub.sh	scripts/generate_match_transcript_qsub.sh	unchanged
+generate_reconstruct_qsub_v2.sh	scripts/generate_reconstruct_qsub_v2.sh	unchanged
+generate_region_bigwig_pbs.sh	scripts/generate_region_bigwig_pbs.sh	unchanged
+match_transcript.py	scripts/match_transcript.py	unchanged
+pbs_ZZJ_Reg1_10_500_1500.sh	scripts/pbs_ZZJ_Reg1_10_500_1500.sh	unchanged
+step3_control_vs_AD_regions.pbs	scripts/step3_control_vs_AD_regions.pbs	unchanged
+step3_run_rmats_G21-4_rm_dup_ALL.sh	scripts/step3_run_rmats_G21-4_rm_dup_ALL.sh	unchanged
+umi_reconstructV5.py	scripts/umi_reconstructV5.py	unchanged
