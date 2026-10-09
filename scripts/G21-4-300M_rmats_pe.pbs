@@ -1,0 +1,55 @@
+#!/bin/bash
+#PBS -N G21-4-300M_rmats_pe
+#PBS -j oe
+#PBS -d /histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260516_AS_saturation/qsub/qsub_rmats_pe
+#PBS -l nodes=1:ppn=10
+#PBS -l walltime=72:00:00
+#PBS -q gold
+
+eval "$(micromamba shell hook --shell bash)"
+micromamba activate rmats_env
+
+ulimit -n 4096
+set -euo pipefail
+
+BAM="/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260516_AS_saturation/data/result_STARsolo/G21-4-300M/STARsolo_pe/G21-4-300M_Aligned_AB.sortedByCoord.out.bam"
+OUT_DIR="/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260516_AS_saturation/rmats_result_pe/G21-4-300M"
+TMP_DIR="/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260516_AS_saturation/rmats_result_pe/tmp/G21-4-300M_tmp"
+
+echo "[$(date '+%F %T')] START G21-4-300M"
+
+if [[ ! -f "${BAM}" ]]; then
+    echo "[ERROR] BAM不存在: ${BAM}"; exit 1
+fi
+
+if ls "${OUT_DIR}"/*.rmats &>/dev/null 2>&1; then
+    echo "  [SKIP] .rmats已存在，跳过（FORCE=1可强制重跑）"
+    exit 0
+fi
+
+mkdir -p "${OUT_DIR}" "${TMP_DIR}"
+echo "${BAM}" > "${OUT_DIR}/b1.txt"
+
+RMATS_PY=$(which rmats.py 2>/dev/null || echo "")
+if [[ -z "${RMATS_PY}" ]]; then
+    echo "[ERROR] 找不到rmats.py"; exit 1
+fi
+
+python "${RMATS_PY}" \
+    --b1 "${OUT_DIR}/b1.txt" \
+    --gtf "/histor/zhao/pangkun/database/ref_mm10_M23_release98/mm10.gtf" \
+    --od  "${OUT_DIR}" \
+    --tmp "${TMP_DIR}" \
+    -t paired \
+    --readLength 150 \
+    --variable-read-length \
+    --allow-clipping \
+    --nthread 10 \
+    --task both \
+    --statoff \
+    2>&1 | tee "${OUT_DIR}/rmats.log"
+
+cp "${TMP_DIR}"/*.rmats "${OUT_DIR}/" 2>/dev/null || true
+rm -rf "${TMP_DIR}"
+
+echo "[$(date '+%F %T')] DONE G21-4-300M -> ${OUT_DIR}"

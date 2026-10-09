@@ -1,0 +1,134 @@
+#!/bin/bash
+#PBS -N AtoI_03_G21-4_0515
+#PBS -j oe
+#PBS -d /histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260505_AtoI/qsub
+#PBS -l nodes=1:ppn=10
+#PBS -l walltime=48:00:00
+#PBS -q gold
+
+set -e
+set -u
+
+# Output sample name. Results will be written to results/${SAMPLE}
+SAMPLE="G21-4_0515"
+# Mapping sample name. Reuse the existing spatial annotation files of G21-4.
+MAP_SAMPLE="G21-4"
+
+QSUB=/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260505_AtoI/qsub
+DATA=/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260505_AtoI/data
+RESULTS=/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260505_AtoI/results/${SAMPLE}
+mkdir -p "$RESULTS"
+
+GATK=/histor/zhao/lupeng/software/gatk-4.6.2.0/gatk
+REF_FA=/histor/zhao/pangkun/Zhaolab/Lupeng/gene-database/ref_kun_mm10/mm10.fa
+REF_DICT=/histor/zhao/pangkun/Zhaolab/Lupeng/gene-database/ref_kun_mm10/mm10.dict
+GTF=/histor/zhao/pangkun/Zhaolab/Lupeng/gene-database/ref_kun_mm10/mm10.gtf
+RADAR=${DATA}/REDIportal_mm10_editing_sites.bed
+
+PYTHON_SCRIPT=${QSUB}/collect_editing_sites_adapted.py
+APPEND_CB_SCRIPT=${QSUB}/append_cb_to_qname.py
+
+MIN_MAP_QUAL=25
+MIN_BASE_QUAL=25
+MIN_DEPTH=10
+MIN_EDIT=1
+
+IN_BAM=/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260515/data/result_STARsolo/G21-4/STARsolo_pe/G21-4_Aligned_AB.sortedByCoord.out.bam
+
+CB_TO_PIXEL=${DATA}/cb_to_pixel_${MAP_SAMPLE}.tsv
+PIXEL_TO_CLU=${DATA}/pixel_to_clu_ID_${MAP_SAMPLE}.tsv
+CLU_TO_REGION=${DATA}/clu_ID_to_region_${MAP_SAMPLE}.tsv
+
+echo "[$(date)] ===== ${SAMPLE} START ====="
+echo "[$(date)] IN_BAM=${IN_BAM}"
+echo "[$(date)] MAP_SAMPLE=${MAP_SAMPLE}"
+echo "[$(date)] RESULTS=${RESULTS}"
+
+for f in "$IN_BAM" "$REF_FA" "$GTF" "$RADAR" "$PYTHON_SCRIPT" "$APPEND_CB_SCRIPT" "$CB_TO_PIXEL" "$PIXEL_TO_CLU" "$CLU_TO_REGION"; do
+    if [ ! -f "$f" ]; then
+        echo "[ERROR] Missing file: $f" >&2
+        exit 1
+    fi
+done
+
+# ── Step 1 & 2: gatk_env (Java required) ─────────────────────
+eval "$(micromamba shell hook --shell bash)"
+micromamba activate gatk_env
+
+if [ ! -f "$REF_DICT" ]; then
+    echo "[$(date)] Step 1: CreateSequenceDictionary..."
+    $GATK CreateSequenceDictionary -R "$REF_FA" -O "$REF_DICT"
+    echo "[$(date)] Step 1: Done."
+else
+    echo "[$(date)] Step 1: .dict exists, skip."
+fi
+
+SPLIT_BAM="${RESULTS}/${SAMPLE}_split.bam"
+if [ ! -f "$SPLIT_BAM" ]; then
+    echo "[$(date)] Step 2: SplitNCigarReads..."
+    $GATK SplitNCigarReads \
+        -R "$REF_FA" \
+        -I "$IN_BAM" \
+        -O "$SPLIT_BAM"
+    echo "[$(date)] Step 2: Done."
+else
+    echo "[$(date)] Step 2: split BAM exists, skip."
+fi
+
+# ── Step 2.5 ~ 4: trackplot2 (samtools + Python) ─────────────
+micromamba activate trackplot2
+
+if [ ! -f "${REF_FA}.fai" ]; then
+    samtools faidx "$REF_FA"
+fi
+if [ ! -f "${SPLIT_BAM}.bai" ]; then
+    samtools index "$SPLIT_BAM"
+fi
+
+# Append CB tag to read name for mpileup --output-QNAME.
+CB_BAM="${RESULTS}/${SAMPLE}_split_cb.bam"
+CB_BAM_MIN_SIZE=$((100 * 1024 * 1024))
+cb_bam_size=0
+[ -f "$CB_BAM" ] && cb_bam_size=$(stat -c%s "$CB_BAM")
+
+if [ ! -f "$CB_BAM" ] || [ "$cb_bam_size" -lt "$CB_BAM_MIN_SIZE" ]; then
+    [ -f "$CB_BAM" ] && echo "[$(date)] Step 2.5: CB BAM too small (${cb_bam_size} bytes), re-running..."
+    echo "[$(date)] Step 2.5: Appending CB to read names (pysam)..."
+    python "$APPEND_CB_SCRIPT" "$SPLIT_BAM" "$CB_BAM"
+    samtools index "$CB_BAM"
+    echo "[$(date)] Step 2.5: Done. Size=$(stat -c%s "$CB_BAM") bytes"
+else
+    echo "[$(date)] Step 2.5: CB BAM exists and valid (${cb_bam_size} bytes), skip."
+fi
+
+# ── Step 3: mpileup, Patho-DBiT-style parameters ──────────────
+MPILEUP_OUT="${RESULTS}/${SAMPLE}_mpileup.tsv"
+mpileup_size=0
+[ -f "$MPILEUP_OUT" ] && mpileup_size=$(stat -c%s "$MPILEUP_OUT")
+
+if [ ! -f "$MPILEUP_OUT" ] || [ "$mpileup_size" -eq 0 ]; then
+    [ -f "$MPILEUP_OUT" ] && echo "[$(date)] Step 3: mpileup output is empty, re-running..."
+    echo "[$(date)] Step 3: mpileup..."
+    samtools mpileup \
+        --no-output-ins --no-output-ins \
+        --no-output-del --no-output-del \
+        --no-output-ends \
+        -B -d 0 \
+        -Q ${MIN_BASE_QUAL} -q ${MIN_MAP_QUAL} \
+        -l "$RADAR" -f "$REF_FA" \
+        "$CB_BAM" --output-QNAME \
+        -o "$MPILEUP_OUT"
+    echo "[$(date)] Step 3: Done. Lines=$(wc -l < "$MPILEUP_OUT")"
+else
+    echo "[$(date)] Step 3: mpileup exists and valid (${mpileup_size} bytes), skip."
+fi
+
+# ── Step 4: collect editing statistics ───────────────────────
+echo "[$(date)] Step 4: collect_editing_sites_adapted.py..."
+python "$PYTHON_SCRIPT" \
+    -m "$MIN_DEPTH" -c "$MIN_EDIT" \
+    "$MPILEUP_OUT" \
+    "$CB_TO_PIXEL" "$PIXEL_TO_CLU" "$CLU_TO_REGION" \
+    "$GTF" "$RESULTS"
+
+echo "[$(date)] ===== ${SAMPLE} ALL DONE ====="

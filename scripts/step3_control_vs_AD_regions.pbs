@@ -1,0 +1,108 @@
+#!/bin/bash
+#PBS -N step3_control_vs_AD_reg
+#PBS -j oe
+#PBS -o /histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260705_Fig3/rmats_works/logs/step3_control_vs_AD_regions.pbs.log
+#PBS -d /histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260705_Fig3/rmats_works/qsub
+#PBS -l nodes=1:ppn=10
+#PBS -l walltime=120:00:00
+#PBS -q gold
+
+set -euo pipefail
+
+eval "$(micromamba shell hook --shell bash)"
+micromamba activate rmats_env
+
+echo "[$(date '+%F %T')] Step3 regions 开始: control_vs_AD"
+echo "  LIB_TYPE: paired"
+echo ""
+
+PB_BASE="/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260705_Fig3/rmats_works/pseudobulk_bams"
+OUT_BASE="/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260705_Fig3/rmats_works/rmats_results/control_vs_AD"
+TMP_BASE="/histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260705_Fig3/rmats_works/rmats_tmp"
+GTF="/histor/zhao/pangkun/database/ref_mm10_M23_release98/mm10.gtf"
+READ_LEN="150"
+LIB_TYPE="paired"
+THREADS="10"
+FORCE=${FORCE:-0}
+
+B1_SAMPLES=(G21-4 G21-7 )
+B2_SAMPLES=(G21-2 G21-5 )
+REGIONS=(CA1 CA3 CTX_1 CTX_2 CTX_3 DG FT HIP HY STR TH VS )
+
+RMATS_PY=$(which rmats.py 2>/dev/null || echo "")
+if [[ -z "${RMATS_PY}" ]]; then
+    echo "[ERROR] 找不到 rmats.py，请检查 rmats_env 环境。" >&2
+    exit 1
+fi
+
+DONE=0; SKIP=0; FAIL=0
+
+for REGION in "${REGIONS[@]}"; do
+    OUT_DIR="${OUT_BASE}/${REGION}"
+    TMP_DIR="${TMP_BASE}/control_vs_AD_${REGION}"
+
+    if [[ -f "${OUT_DIR}/SE.MATS.JC.txt" && "${FORCE}" != "1" ]]; then
+        echo "  [SKIP]  ${REGION}: 已完成（FORCE=1 可强制重跑）"
+        (( SKIP++ )) || true
+        continue
+    fi
+
+    B1_BAMS=()
+    ALL_EXIST=1
+    for S in "${B1_SAMPLES[@]}"; do
+        BAM="${PB_BASE}/${S}/${S}_${REGION}_pseudobulk.bam"
+        if [[ ! -f "${BAM}" ]]; then
+            echo "  [SKIP]  ${REGION}: 缺少 b1 BAM: ${BAM}"
+            ALL_EXIST=0
+            break
+        fi
+        B1_BAMS+=("${BAM}")
+    done
+    [[ "${ALL_EXIST}" -eq 0 ]] && { (( SKIP++ )) || true; continue; }
+
+    B2_BAMS=()
+    for S in "${B2_SAMPLES[@]}"; do
+        BAM="${PB_BASE}/${S}/${S}_${REGION}_pseudobulk.bam"
+        if [[ ! -f "${BAM}" ]]; then
+            echo "  [SKIP]  ${REGION}: 缺少 b2 BAM: ${BAM}"
+            ALL_EXIST=0
+            break
+        fi
+        B2_BAMS+=("${BAM}")
+    done
+    [[ "${ALL_EXIST}" -eq 0 ]] && { (( SKIP++ )) || true; continue; }
+
+    if [[ "${FORCE}" == "1" ]]; then
+        rm -rf "${OUT_DIR}" "${TMP_DIR}"
+    fi
+    mkdir -p "${OUT_DIR}" "${TMP_DIR}"
+
+    (IFS=,; echo "${B1_BAMS[*]}") > "${OUT_DIR}/b1.txt"
+    (IFS=,; echo "${B2_BAMS[*]}") > "${OUT_DIR}/b2.txt"
+
+    echo "  [RUN]   ${REGION}"
+    echo "    b1: $(cat "${OUT_DIR}/b1.txt")"
+    echo "    b2: $(cat "${OUT_DIR}/b2.txt")"
+
+    python "${RMATS_PY}"         --b1 "${OUT_DIR}/b1.txt"         --b2 "${OUT_DIR}/b2.txt"         --gtf "${GTF}"         --od  "${OUT_DIR}"         --tmp "${TMP_DIR}"         -t "${LIB_TYPE}"         --readLength "${READ_LEN}"         --variable-read-length         --allow-clipping         --nthread "${THREADS}"         --task both         2>&1 | tee "${OUT_DIR}/rmats.log"
+
+    ok=1
+    for AS in SE A5SS A3SS MXE RI; do
+        [[ ! -f "${OUT_DIR}/${AS}.MATS.JC.txt" ]] && ok=0
+    done
+
+    if [[ "${ok}" -eq 1 ]]; then
+        echo "    ✓ ${REGION} 完成"
+        (( DONE++ )) || true
+    else
+        echo "    ⚠  ${REGION} 输出不完整，请检查 rmats.log"
+        (( FAIL++ )) || true
+    fi
+
+    rm -rf "${TMP_DIR}"
+done
+
+echo ""
+echo "[$(date '+%F %T')] Step3 regions 完成: control_vs_AD"
+echo "  完成: ${DONE}  跳过: ${SKIP}  失败: ${FAIL}"
+echo "  结果目录: ${OUT_BASE}/"

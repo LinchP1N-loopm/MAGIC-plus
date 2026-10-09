@@ -1,0 +1,12 @@
+#!/bin/bash
+#PBS -N AtoI_01_export_maps
+#PBS -j oe
+#PBS -d /histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260505_AtoI/qsub
+#PBS -l nodes=1:ppn=10
+#PBS -l walltime=24:00:00
+#PBS -q batch
+
+eval "$(micromamba shell hook --shell bash)"
+micromamba activate trackplot2
+
+python /histor/zhao/pangkun/Zhaolab/Lupeng/Zhujunjie/20260505_AtoI/qsub/export_spatial_maps.py
