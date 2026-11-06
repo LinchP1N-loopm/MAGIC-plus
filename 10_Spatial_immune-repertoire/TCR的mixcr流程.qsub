@@ -1,0 +1,1294 @@
+#!/bin/bash
+#PBS -N mixcr_TCR_bulk_234
+#PBS -l nodes=node206:ppn=24
+#PBS -l walltime=1200:00:00
+#PBS -q silver
+#PBS -j oe
+
+set -e
+
+# ============================================================
+# Parameters
+# ============================================================
+
+SAMPLE=T23-4
+ST_SAMPLE=${SAMPLE}_Tn5
+
+THREADS=24
+MIXCR_XMX=120g
+SORT_MEM=80G
+
+WORKDIR=/path/to/project/magic/fig5/mixcr/0929_bulk/${SAMPLE}
+
+FASTQ_DIR=/path/to/project/magic/20260713BCRTCR加测/data/result_STARsolo/${ST_SAMPLE}
+
+WHITELIST=/path/to/project/20251203/data/Barcode/whitelist.txt
+
+R1_RNA=${FASTQ_DIR}/${ST_SAMPLE}_R1.rna.fq.gz
+R1_BARCODE=${FASTQ_DIR}/${ST_SAMPLE}_R1.barcode.fq.gz
+R2_RNA=${FASTQ_DIR}/${ST_SAMPLE}_R2.cleaned.fq.gz
+
+MIXCR=mixcr
+
+# ============================================================
+# Output directory
+# ============================================================
+
+OUTDIR=${WORKDIR}/mixcr_out_TCR_bulk_v2
+
+REPORT_DIR=${OUTDIR}/reports
+CHECKPOINT_DIR=${OUTDIR}/checkpoints
+EXPORT_DIR=${OUTDIR}/export
+SPATIAL_DIR=${OUTDIR}/spatial_mapping
+ADATA_DIR=${OUTDIR}/adata_ready
+QC_DIR=${OUTDIR}/qc
+
+VDJ_DIR=${OUTDIR}/VDJRegion
+TMP_DIR=${OUTDIR}/tmp_spatial
+
+mkdir -p \
+    "${OUTDIR}" \
+    "${REPORT_DIR}" \
+    "${CHECKPOINT_DIR}" \
+    "${EXPORT_DIR}" \
+    "${SPATIAL_DIR}" \
+    "${ADATA_DIR}" \
+    "${QC_DIR}" \
+    "${VDJ_DIR}" \
+    "${TMP_DIR}"
+
+cd "${WORKDIR}" || exit 1
+
+source /path/to/project/anaconda3/etc/profile.d/conda.sh
+conda activate /path/to/project/anaconda3/envs/mixcr_env || exit 1
+
+# ============================================================
+# 公共函数
+# ============================================================
+
+fail() {
+    echo
+    echo "============================================================"
+    echo "[ERROR] $1"
+    echo "Time: $(date)"
+    echo "============================================================"
+    exit 1
+}
+
+check_input() {
+    if [ ! -s "$1" ]; then
+        fail "Missing or empty input file: $1"
+    fi
+}
+
+step_valid() {
+    marker="$1"
+    shift
+    if [ ! -f "${marker}" ]; then
+        return 1
+    fi
+    for f in "$@"; do
+        if [ ! -s "${f}" ]; then
+            echo "[CHECKPOINT INVALID] ${marker}"
+            echo "Missing/empty output: ${f}"
+            rm -f "${marker}"
+            return 1
+        fi
+    done
+    return 0
+}
+
+mark_done() {
+    marker="$1"
+    shift
+    for f in "$@"; do
+        if [ ! -s "${f}" ]; then
+            fail "Step finished but output missing/empty: ${f}"
+        fi
+    done
+    touch "${marker}"
+}
+
+# ============================================================
+# Check inputs
+# ============================================================
+
+check_input "${R1_RNA}"
+check_input "${R1_BARCODE}"
+check_input "${R2_RNA}"
+check_input "${WHITELIST}"
+
+command -v "${MIXCR}" >/dev/null 2>&1 || fail "MiXCR not found"
+"${MIXCR}" --version || fail "MiXCR version check failed"
+
+echo "============================================================"
+echo "MiXCR bulk spatial TCR pipeline"
+echo "Sample: ${SAMPLE}"
+echo "Threads: ${THREADS}"
+echo "MiXCR memory: ${MIXCR_XMX}"
+echo "Output: ${OUTDIR}"
+echo "Start: $(date)"
+echo "============================================================"
+
+# ============================================================
+# Step 0
+# read -> spatial barcode / UMI
+# ============================================================
+
+READ_BARCODE_TABLE=${SPATIAL_DIR}/${SAMPLE}_read_to_raw_barcode_umi.tsv
+STEP0_MARKER=${CHECKPOINT_DIR}/00_read_barcode.done
+
+if step_valid "${STEP0_MARKER}" "${READ_BARCODE_TABLE}"; then
+    echo "[SKIP] Step 0 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 0: build read -> barcode / UMI table"
+    echo "============================================================"
+
+    rm -f "${READ_BARCODE_TABLE}.tmp"
+
+    printf "read_name\tbarcode\tUMI\n" > "${READ_BARCODE_TABLE}.tmp"
+
+    zcat "${R1_BARCODE}" | awk '
+    BEGIN{OFS="\t"}
+    NR%4==1{
+        name=substr($0,2)
+        sub(/[ \t].*/,"",name)
+    }
+    NR%4==2{
+        barcode=substr($0,1,16)
+        umi=substr($0,17,12)
+        print name,barcode,umi
+    }
+    ' >> "${READ_BARCODE_TABLE}.tmp"
+
+    mv "${READ_BARCODE_TABLE}.tmp" "${READ_BARCODE_TABLE}"
+    mark_done "${STEP0_MARKER}" "${READ_BARCODE_TABLE}"
+fi
+
+# ============================================================
+# Step 1
+# TCR alignment
+# ============================================================
+
+ALIGNMENTS=${OUTDIR}/${SAMPLE}.alignments.vdjca
+
+ALIGN_REPORT=${REPORT_DIR}/${SAMPLE}.align.report.txt
+ALIGN_JSON=${REPORT_DIR}/${SAMPLE}.align.report.json
+
+STEP1_MARKER=${CHECKPOINT_DIR}/01_align.done
+
+if step_valid "${STEP1_MARKER}" "${ALIGNMENTS}" "${ALIGN_REPORT}" "${ALIGN_JSON}"; then
+    echo "[SKIP] Step 1 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 1: align TCR reads"
+    echo "Memory: ${MIXCR_XMX}"
+    echo "============================================================"
+
+    rm -f "${ALIGNMENTS}" "${ALIGN_REPORT}" "${ALIGN_JSON}"
+
+    "${MIXCR}" -Xmx${MIXCR_XMX} align \
+        -f \
+        --threads "${THREADS}" \
+        --preset rna-seq \
+        --rna \
+        --species hsa \
+        -OsaveOriginalReads=true \
+        -OallowNoCDR3PartAlignments=true \
+        -OvParameters.geneFeatureToAlign=VTranscriptWithout5UTRWithP \
+        --report "${ALIGN_REPORT}" \
+        --json-report "${ALIGN_JSON}" \
+        "${R1_RNA}" \
+        "${R2_RNA}" \
+        "${ALIGNMENTS}"
+
+    [ $? -eq 0 ] || fail "Step 1 align failed"
+
+    mark_done "${STEP1_MARKER}" "${ALIGNMENTS}" "${ALIGN_REPORT}" "${ALIGN_JSON}"
+fi
+
+# ============================================================
+# Step 2
+# CDR3 global clonotype assembly
+# ============================================================
+
+CLNA=${OUTDIR}/${SAMPLE}.clna
+
+ASSEMBLE_REPORT=${REPORT_DIR}/${SAMPLE}.assemble.report.txt
+ASSEMBLE_JSON=${REPORT_DIR}/${SAMPLE}.assemble.report.json
+
+STEP2_MARKER=${CHECKPOINT_DIR}/02_assemble.done
+
+if step_valid "${STEP2_MARKER}" "${CLNA}" "${ASSEMBLE_REPORT}" "${ASSEMBLE_JSON}"; then
+    echo "[SKIP] Step 2 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 2: assemble CDR3 TCR clonotypes"
+    echo "Memory: ${MIXCR_XMX}"
+    echo "============================================================"
+
+    rm -f "${CLNA}" "${ASSEMBLE_REPORT}" "${ASSEMBLE_JSON}"
+
+    "${MIXCR}" -Xmx${MIXCR_XMX} assemble \
+        -f \
+        -OassemblingFeatures=CDR3 \
+        -OseparateByV=true \
+        -OseparateByJ=true \
+        --write-alignments \
+        --report "${ASSEMBLE_REPORT}" \
+        --json-report "${ASSEMBLE_JSON}" \
+        "${ALIGNMENTS}" \
+        "${CLNA}"
+
+    [ $? -eq 0 ] || fail "Step 2 assemble failed"
+
+    mark_done "${STEP2_MARKER}" "${CLNA}" "${ASSEMBLE_REPORT}" "${ASSEMBLE_JSON}"
+fi
+
+# ============================================================
+# Step 3
+# 主 contig
+# 不限定 VDJRegion
+# 尽可能拼长
+# ============================================================
+
+MAIN_CLNS=${OUTDIR}/${SAMPLE}.contigs.clns
+
+MAIN_CONTIG_REPORT=${REPORT_DIR}/${SAMPLE}.assembleContigs.report.txt
+MAIN_CONTIG_JSON=${REPORT_DIR}/${SAMPLE}.assembleContigs.report.json
+
+STEP3_MARKER=${CHECKPOINT_DIR}/03_main_contigs.done
+
+if step_valid "${STEP3_MARKER}" "${MAIN_CLNS}" "${MAIN_CONTIG_REPORT}" "${MAIN_CONTIG_JSON}"; then
+    echo "[SKIP] Step 3 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 3: assemble longest main TCR contigs"
+    echo "Memory: ${MIXCR_XMX}"
+    echo "============================================================"
+
+    rm -f "${MAIN_CLNS}" "${MAIN_CONTIG_REPORT}" "${MAIN_CONTIG_JSON}"
+
+    "${MIXCR}" -Xmx${MIXCR_XMX} assembleContigs \
+        -f \
+        --threads "${THREADS}" \
+        --report "${MAIN_CONTIG_REPORT}" \
+        --json-report "${MAIN_CONTIG_JSON}" \
+        "${CLNA}" \
+        "${MAIN_CLNS}"
+
+    [ $? -eq 0 ] || fail "Step 3 assembleContigs failed"
+
+    mark_done "${STEP3_MARKER}" "${MAIN_CLNS}" "${MAIN_CONTIG_REPORT}" "${MAIN_CONTIG_JSON}"
+fi
+
+# ============================================================
+# Step 4
+# 导出 global clonotype + main contig
+# ============================================================
+
+GLOBAL_TCR=${EXPORT_DIR}/${SAMPLE}_TCR_global_clonotypes.tsv
+GLOBAL_TRA=${EXPORT_DIR}/${SAMPLE}_TRA_global_clonotypes.tsv
+GLOBAL_TRB=${EXPORT_DIR}/${SAMPLE}_TRB_global_clonotypes.tsv
+
+MAIN_TCR=${EXPORT_DIR}/${SAMPLE}_TCR_clones.tsv
+MAIN_TRA=${EXPORT_DIR}/${SAMPLE}_TRA_clones.tsv
+MAIN_TRB=${EXPORT_DIR}/${SAMPLE}_TRB_clones.tsv
+
+STEP4_MARKER=${CHECKPOINT_DIR}/04_main_exports.done
+
+if step_valid \
+    "${STEP4_MARKER}" \
+    "${GLOBAL_TCR}" \
+    "${GLOBAL_TRA}" \
+    "${GLOBAL_TRB}" \
+    "${MAIN_TCR}" \
+    "${MAIN_TRA}" \
+    "${MAIN_TRB}"
+then
+    echo "[SKIP] Step 4 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 4: export global/main TCR clonotypes"
+    echo "Memory: ${MIXCR_XMX}"
+    echo "============================================================"
+
+    export_global() {
+        CHAINS="$1"
+        OUTPUT="$2"
+
+        "${MIXCR}" -Xmx${MIXCR_XMX} exportClones \
+            -f \
+            --drop-default-fields \
+            --chains "${CHAINS}" \
+            -cloneId \
+            -readCount \
+            -readFraction \
+            -chains \
+            -vGene \
+            -dGene \
+            -jGene \
+            -cGene \
+            -nFeature CDR3 \
+            -aaFeature CDR3 \
+            -isProductive CDR3 \
+            "${CLNA}" \
+            "${OUTPUT}"
+    }
+
+    export_global "TR" "${GLOBAL_TCR}"
+    export_global "TRA" "${GLOBAL_TRA}"
+    export_global "TRB" "${GLOBAL_TRB}"
+
+    export_main() {
+        CHAINS="$1"
+        OUTPUT="$2"
+
+        "${MIXCR}" -Xmx${MIXCR_XMX} exportClones \
+            -f \
+            --drop-default-fields \
+            --chains "${CHAINS}" \
+            --dont-impute-germline-on-export \
+            --not-covered-as-empty \
+            -cloneId \
+            -readCount \
+            -readFraction \
+            -chains \
+            -vGene \
+            -dGene \
+            -jGene \
+            -cGene \
+            -nFeature CDR3 \
+            -aaFeature CDR3 \
+            -nFeature VDJRegion \
+            -aaFeature VDJRegion \
+            -nFeature VRegionTrimmed \
+            -nFeature JRegionTrimmed \
+            -isProductive CDR3 \
+            -isProductive VDJRegion \
+            "${MAIN_CLNS}" \
+            "${OUTPUT}"
+    }
+
+    export_main "TR" "${MAIN_TCR}"
+    export_main "TRA" "${MAIN_TRA}"
+    export_main "TRB" "${MAIN_TRB}"
+
+    mark_done \
+        "${STEP4_MARKER}" \
+        "${GLOBAL_TCR}" \
+        "${GLOBAL_TRA}" \
+        "${GLOBAL_TRB}" \
+        "${MAIN_TCR}" \
+        "${MAIN_TRA}" \
+        "${MAIN_TRB}"
+fi
+
+# ============================================================
+# Step 5
+# read -> cloneId
+# ============================================================
+
+READ_CLONE_TABLE=${SPATIAL_DIR}/${SAMPLE}_alignments_read_clone_descr.tsv
+
+STEP5_MARKER=${CHECKPOINT_DIR}/05_read_clone.done
+
+if step_valid "${STEP5_MARKER}" "${READ_CLONE_TABLE}"; then
+    echo "[SKIP] Step 5 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 5: export read -> clone"
+    echo "Memory: ${MIXCR_XMX}"
+    echo "============================================================"
+
+    rm -f "${READ_CLONE_TABLE}"
+
+    "${MIXCR}" -Xmx${MIXCR_XMX} exportAlignments \
+        -f \
+        --drop-default-fields \
+        -cloneIdWithMappingType \
+        -cloneId \
+        -descrsR1 \
+        -descrsR2 \
+        -nFeature CDR3 \
+        -vGene \
+        -dGene \
+        -jGene \
+        -cGene \
+        "${CLNA}" \
+        "${READ_CLONE_TABLE}"
+
+    [ $? -eq 0 ] || fail "Step 5 exportAlignments failed"
+
+    mark_done "${STEP5_MARKER}" "${READ_CLONE_TABLE}"
+fi
+
+# ============================================================
+# Step 6
+# 空间回映射
+#
+# read -> barcode + UMI
+# read -> cloneId
+#
+# 最终：
+# barcode × cloneId
+# readCount
+# uniqueMoleculeCount
+# ============================================================
+
+SPOT_CLONE_COUNTS=${SPATIAL_DIR}/${SAMPLE}_spot_clone_counts.tsv
+
+STEP6_MARKER=${CHECKPOINT_DIR}/06_spatial_mapping.done
+
+if step_valid "${STEP6_MARKER}" "${SPOT_CLONE_COUNTS}"; then
+    echo "[SKIP] Step 6 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 6: spatial read -> clone remapping"
+    echo "============================================================"
+
+    BARCODE_SORTED=${TMP_DIR}/barcode.sorted.tsv
+    CLONE_MIN=${TMP_DIR}/read_clone.min.tsv
+    CLONE_SORTED=${TMP_DIR}/read_clone.sorted.tsv
+    JOINED=${TMP_DIR}/joined.tsv
+    JOINED_SORTED=${TMP_DIR}/joined.by_spot_clone_umi.tsv
+
+    if [ ! -s "${BARCODE_SORTED}" ]; then
+        echo "[6.1] Sorting read -> barcode table"
+        rm -f "${BARCODE_SORTED}.tmp"
+
+        tail -n +2 "${READ_BARCODE_TABLE}" |
+        LC_ALL=C sort \
+            -T "${TMP_DIR}" \
+            -S "${SORT_MEM}" \
+            --parallel="${THREADS}" \
+            -t $'\t' \
+            -k1,1 \
+            > "${BARCODE_SORTED}.tmp"
+
+        mv "${BARCODE_SORTED}.tmp" "${BARCODE_SORTED}"
+    else
+        echo "[SKIP] barcode sorted table exists"
+    fi
+
+    if [ ! -s "${CLONE_MIN}" ]; then
+        echo "[6.2] Extracting read name -> cloneId"
+        rm -f "${CLONE_MIN}.tmp"
+
+        awk -F '\t' '
+        BEGIN{OFS="\t"}
+        NR==1{
+            for(i=1;i<=NF;i++){
+                if($i=="descrsR1") d=i
+                if($i=="cloneId") c=i
+            }
+            if(!d || !c){
+                print "[ERROR] Cannot find descrsR1/cloneId" > "/dev/stderr"
+                exit 2
+            }
+            next
+        }
+        {
+            name=$d
+            sub(/^@/,"",name)
+            sub(/[ \t].*/,"",name)
+            clone=$c
+            if(name!="" && clone!="" && clone!="-1"){
+                print name,clone
+            }
+        }
+        ' "${READ_CLONE_TABLE}" > "${CLONE_MIN}.tmp"
+
+        mv "${CLONE_MIN}.tmp" "${CLONE_MIN}"
+    else
+        echo "[SKIP] minimal read -> clone table exists"
+    fi
+
+    if [ ! -s "${CLONE_SORTED}" ]; then
+        echo "[6.3] Sorting read -> clone table"
+        rm -f "${CLONE_SORTED}.tmp"
+
+        LC_ALL=C sort \
+            -T "${TMP_DIR}" \
+            -S "${SORT_MEM}" \
+            --parallel="${THREADS}" \
+            -t $'\t' \
+            -k1,1 \
+            "${CLONE_MIN}" \
+            > "${CLONE_SORTED}.tmp"
+
+        mv "${CLONE_SORTED}.tmp" "${CLONE_SORTED}"
+    else
+        echo "[SKIP] clone sorted table exists"
+    fi
+
+    if [ ! -s "${JOINED}" ]; then
+        echo "[6.4] Joining barcode and clone tables"
+        rm -f "${JOINED}.tmp"
+
+        LC_ALL=C join \
+            -t $'\t' \
+            -1 1 \
+            -2 1 \
+            "${BARCODE_SORTED}" \
+            "${CLONE_SORTED}" \
+            > "${JOINED}.tmp"
+
+        mv "${JOINED}.tmp" "${JOINED}"
+    else
+        echo "[SKIP] joined read table exists"
+    fi
+
+    if [ ! -s "${JOINED_SORTED}" ]; then
+        echo "[6.5] Sorting joined table by spot / clone / UMI"
+        rm -f "${JOINED_SORTED}.tmp"
+
+        LC_ALL=C sort \
+            -T "${TMP_DIR}" \
+            -S "${SORT_MEM}" \
+            --parallel="${THREADS}" \
+            -t $'\t' \
+            -k2,2 \
+            -k4,4n \
+            -k3,3 \
+            "${JOINED}" \
+            > "${JOINED_SORTED}.tmp"
+
+        mv "${JOINED_SORTED}.tmp" "${JOINED_SORTED}"
+    else
+        echo "[SKIP] joined sorted table exists"
+    fi
+
+    echo "[6.6] Aggregating spot × clone"
+    rm -f "${SPOT_CLONE_COUNTS}.tmp"
+
+    awk -F '\t' '
+    BEGIN{
+        OFS="\t"
+        print "barcode","cloneId","readCount","uniqueMoleculeCount"
+    }
+    {
+        barcode=$2
+        umi=$3
+        clone=$4
+        key=barcode SUBSEP clone
+
+        if(NR==1){
+            prev_key=key
+            prev_barcode=barcode
+            prev_clone=clone
+            prev_umi=""
+            reads=0
+            umis=0
+        }
+
+        if(key!=prev_key){
+            print prev_barcode,prev_clone,reads,umis
+            prev_key=key
+            prev_barcode=barcode
+            prev_clone=clone
+            prev_umi=""
+            reads=0
+            umis=0
+        }
+
+        reads++
+
+        if(umi!=prev_umi){
+            umis++
+            prev_umi=umi
+        }
+    }
+    END{
+        if(NR>0){
+            print prev_barcode,prev_clone,reads,umis
+        }
+    }
+    ' "${JOINED_SORTED}" > "${SPOT_CLONE_COUNTS}.tmp"
+
+    mv "${SPOT_CLONE_COUNTS}.tmp" "${SPOT_CLONE_COUNTS}"
+
+    mark_done "${STEP6_MARKER}" "${SPOT_CLONE_COUNTS}"
+
+    rm -f \
+        "${BARCODE_SORTED}" \
+        "${CLONE_MIN}" \
+        "${CLONE_SORTED}" \
+        "${JOINED}" \
+        "${JOINED_SORTED}"
+fi
+
+# ============================================================
+# Step 7
+# adata-ready
+#
+# 输出：
+# TCR_spot_clone_long.tsv
+# TCR_spot_summary.tsv
+# ============================================================
+
+SPOT_TCR_LONG=${ADATA_DIR}/${SAMPLE}_TCR_spot_clone_long.tsv
+SPOT_SUMMARY=${ADATA_DIR}/${SAMPLE}_TCR_spot_summary.tsv
+
+STEP7_MARKER=${CHECKPOINT_DIR}/07_adata_ready.done
+
+if step_valid "${STEP7_MARKER}" "${SPOT_TCR_LONG}" "${SPOT_SUMMARY}"; then
+    echo "[SKIP] Step 7 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 7: build adata-ready TCR tables"
+    echo "============================================================"
+
+    python - \
+        "${SPOT_CLONE_COUNTS}" \
+        "${GLOBAL_TCR}" \
+        "${MAIN_TCR}" \
+        "${WHITELIST}" \
+        "${SPOT_TCR_LONG}" \
+        "${SPOT_SUMMARY}" <<'PY'
+
+import sys
+from pathlib import Path
+import pandas as pd
+import numpy as np
+
+spot_file = Path(sys.argv[1])
+global_file = Path(sys.argv[2])
+main_file = Path(sys.argv[3])
+whitelist_file = Path(sys.argv[4])
+long_out = Path(sys.argv[5])
+summary_out = Path(sys.argv[6])
+
+spot = pd.read_csv(spot_file, sep="\t", low_memory=False)
+global_tcr = pd.read_csv(global_file, sep="\t", low_memory=False)
+main = pd.read_csv(main_file, sep="\t", low_memory=False)
+
+spot["cloneId"] = pd.to_numeric(spot["cloneId"], errors="coerce").astype("Int64")
+global_tcr["cloneId"] = pd.to_numeric(global_tcr["cloneId"], errors="coerce").astype("Int64")
+main["cloneId"] = pd.to_numeric(main["cloneId"], errors="coerce").astype("Int64")
+
+with open(whitelist_file) as f:
+    barcodes = [x.strip().split()[0] for x in f if x.strip()]
+
+barcode_set = set(barcodes)
+spot = spot[spot["barcode"].astype(str).isin(barcode_set)].copy()
+
+keep_global = [
+    c for c in [
+        "cloneId",
+        "allChains",
+        "chains",
+        "bestVGene",
+        "bestDGene",
+        "bestJGene",
+        "bestCGene",
+        "nSeqCDR3",
+        "aaSeqCDR3",
+        "isProductiveCDR3",
+    ]
+    if c in global_tcr.columns
+]
+
+g = global_tcr[keep_global].copy()
+
+main_keep = [
+    c for c in [
+        "cloneId",
+        "nSeqVDJRegion",
+        "aaSeqVDJRegion",
+        "nSeqVRegionTrimmed",
+        "nSeqJRegionTrimmed",
+        "isProductiveVDJRegion",
+    ]
+    if c in main.columns
+]
+
+m = main[main_keep].copy()
+
+long = spot.merge(g, on="cloneId", how="inner")
+
+if len(main_keep) > 1:
+    long = long.merge(m, on="cloneId", how="left")
+
+chain_col = None
+for c in ["allChains", "chains"]:
+    if c in long.columns:
+        chain_col = c
+        break
+
+if chain_col is None:
+    raise RuntimeError(f"Cannot find chain column: {list(long.columns)}")
+
+def get_chain(x):
+    x = str(x).upper()
+    if "TRA" in x:
+        return "TRA"
+    if "TRB" in x:
+        return "TRB"
+    if "TRG" in x:
+        return "TRG"
+    if "TRD" in x:
+        return "TRD"
+    return ""
+
+long["_chain"] = long[chain_col].map(get_chain)
+
+long.to_csv(long_out, sep="\t", index=False)
+
+rows = []
+
+for barcode, d in long.groupby("barcode", sort=False):
+    total_reads = float(d["readCount"].sum())
+    total_umi = float(d["uniqueMoleculeCount"].sum())
+
+    row = {
+        "barcode": barcode,
+        "TCR_total_count": total_reads,
+        "TCR_total_UMI": total_umi,
+        "TCR_unique_clone": int(d["cloneId"].nunique()),
+        "TCR_positive": 1,
+    }
+
+    for chain in ["TRA", "TRB", "TRG", "TRD"]:
+        z = d[d["_chain"] == chain]
+
+        row[f"TCR_{chain}_count"] = float(z["readCount"].sum())
+        row[f"TCR_{chain}_UMI"] = float(z["uniqueMoleculeCount"].sum())
+        row[f"TCR_{chain}_unique_clone"] = int(z["cloneId"].nunique())
+
+    if len(d):
+        idx = d["readCount"].astype(float).idxmax()
+        dom = d.loc[idx]
+
+        row["TCR_dominant_cloneId"] = dom["cloneId"]
+        row["TCR_dominant_chain"] = dom["_chain"]
+        row["TCR_dominant_count"] = float(dom["readCount"])
+        row["TCR_dominant_fraction"] = float(dom["readCount"]) / total_reads if total_reads > 0 else 0
+
+    if "nSeqVDJRegion" in d.columns:
+        vdj = d["nSeqVDJRegion"].fillna("").astype(str).str.strip()
+        complete = vdj.ne("") & vdj.str.lower().ne("nan")
+
+        row["TCR_VDJ_complete_clone_records"] = int(complete.sum())
+        row["TCR_VDJ_complete_unique_clone"] = int(d.loc[complete, "cloneId"].nunique())
+        row["TCR_VDJ_complete_fraction"] = complete.mean() if len(complete) else 0
+
+    rows.append(row)
+
+summary = pd.DataFrame(rows)
+
+base = pd.DataFrame({"barcode": barcodes})
+
+summary = base.merge(summary, on="barcode", how="left")
+
+for c in summary.columns:
+    if c == "barcode":
+        continue
+    if pd.api.types.is_numeric_dtype(summary[c]):
+        summary[c] = summary[c].fillna(0)
+
+summary["TCR_positive"] = summary["TCR_positive"].fillna(0).astype(int)
+
+summary.to_csv(summary_out, sep="\t", index=False)
+
+print("Spot clone records:", len(long))
+print("TCR-positive spots:", int(summary["TCR_positive"].sum()))
+print("Total whitelist spots:", len(summary))
+
+for chain in ["TRA", "TRB", "TRG", "TRD"]:
+    col = f"TCR_{chain}_count"
+    if col in summary.columns:
+        print(f"{chain}-positive spots:", int((summary[col] > 0).sum()))
+PY
+
+    [ $? -eq 0 ] || fail "Step 7 adata-ready failed"
+
+    mark_done "${STEP7_MARKER}" "${SPOT_TCR_LONG}" "${SPOT_SUMMARY}"
+fi
+
+# ============================================================
+# Step 8
+# main contig read-support QC
+# ============================================================
+
+CLONE_QC=${QC_DIR}/${SAMPLE}_TCR_clone_support_QC.tsv
+CLONE_QC_SUMMARY=${QC_DIR}/${SAMPLE}_TCR_clone_support_summary.tsv
+
+STEP8_MARKER=${CHECKPOINT_DIR}/08_clone_support_QC.done
+
+if step_valid "${STEP8_MARKER}" "${CLONE_QC}" "${CLONE_QC_SUMMARY}"; then
+    echo "[SKIP] Step 8 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 8: TCR clone read-support QC"
+    echo "============================================================"
+
+    python - \
+        "${MAIN_TCR}" \
+        "${CLONE_QC}" \
+        "${CLONE_QC_SUMMARY}" <<'PY'
+
+import sys
+import pandas as pd
+import numpy as np
+
+inp, out_clone, out_summary = sys.argv[1:4]
+
+df = pd.read_csv(inp, sep="\t", low_memory=False)
+
+df["readCount"] = pd.to_numeric(df["readCount"], errors="coerce").fillna(0)
+
+vdj = df["nSeqVDJRegion"].fillna("").astype(str).str.strip()
+
+df["Complete_VDJRegion"] = vdj.ne("") & vdj.str.lower().ne("nan")
+
+def support_bin(x):
+    if x <= 1:
+        return "1"
+    if x <= 4:
+        return "2-4"
+    if x <= 9:
+        return "5-9"
+    if x <= 19:
+        return "10-19"
+    if x <= 49:
+        return "20-49"
+    if x <= 99:
+        return "50-99"
+    return ">=100"
+
+order = ["1", "2-4", "5-9", "10-19", "20-49", "50-99", ">=100"]
+
+df["read_support_bin"] = df["readCount"].map(support_bin)
+
+df.to_csv(out_clone, sep="\t", index=False)
+
+rows = []
+
+for group in order:
+    d = df[df["read_support_bin"] == group]
+    n = len(d)
+    n_vdj = int(d["Complete_VDJRegion"].sum())
+
+    rows.append({
+        "read_support_bin": group,
+        "n_clonotypes": n,
+        "clonotype_percent": n / len(df) * 100 if len(df) else np.nan,
+        "complete_VDJ_clonotypes": n_vdj,
+        "complete_VDJ_percent": n_vdj / n * 100 if n else np.nan,
+        "median_readCount": d["readCount"].median() if n else np.nan,
+        "total_reads": d["readCount"].sum() if n else 0,
+    })
+
+summary = pd.DataFrame(rows)
+
+summary.to_csv(out_summary, sep="\t", index=False)
+
+print(summary.to_string(index=False))
+PY
+
+    [ $? -eq 0 ] || fail "Step 8 QC failed"
+
+    mark_done "${STEP8_MARKER}" "${CLONE_QC}" "${CLONE_QC_SUMMARY}"
+fi
+
+# ============================================================
+# Step 9
+# VDJRegion 定向 contig assembly
+# ============================================================
+
+VDJ_CLNS=${VDJ_DIR}/${SAMPLE}.VDJRegion.clns
+
+VDJ_REPORT=${REPORT_DIR}/${SAMPLE}.VDJRegion.assembleContigs.report.txt
+VDJ_JSON=${REPORT_DIR}/${SAMPLE}.VDJRegion.assembleContigs.report.json
+
+STEP9_MARKER=${CHECKPOINT_DIR}/09_VDJRegion_contigs.done
+
+if step_valid "${STEP9_MARKER}" "${VDJ_CLNS}" "${VDJ_REPORT}" "${VDJ_JSON}"; then
+    echo "[SKIP] Step 9 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 9: assemble VDJRegion TCR contigs"
+    echo "Memory: ${MIXCR_XMX}"
+    echo "============================================================"
+
+    rm -f "${VDJ_CLNS}" "${VDJ_REPORT}" "${VDJ_JSON}"
+
+    "${MIXCR}" -Xmx${MIXCR_XMX} assembleContigs \
+        -f \
+        --threads "${THREADS}" \
+        --assemble-contigs-by VDJRegion \
+        --report "${VDJ_REPORT}" \
+        --json-report "${VDJ_JSON}" \
+        "${CLNA}" \
+        "${VDJ_CLNS}"
+
+    [ $? -eq 0 ] || fail "Step 9 VDJRegion assembly failed"
+
+    mark_done "${STEP9_MARKER}" "${VDJ_CLNS}" "${VDJ_REPORT}" "${VDJ_JSON}"
+fi
+
+# ============================================================
+# Step 10
+# 导出 VDJRegion contigs
+# ============================================================
+
+VDJ_TCR=${VDJ_DIR}/${SAMPLE}_TCR_VDJRegion.tsv
+VDJ_TRA=${VDJ_DIR}/${SAMPLE}_TRA_VDJRegion.tsv
+VDJ_TRB=${VDJ_DIR}/${SAMPLE}_TRB_VDJRegion.tsv
+
+STEP10_MARKER=${CHECKPOINT_DIR}/10_VDJRegion_export.done
+
+if step_valid "${STEP10_MARKER}" "${VDJ_TCR}" "${VDJ_TRA}" "${VDJ_TRB}"; then
+    echo "[SKIP] Step 10 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 10: export TCR VDJRegion"
+    echo "Memory: ${MIXCR_XMX}"
+    echo "============================================================"
+
+    export_vdj() {
+        CHAINS="$1"
+        OUTPUT="$2"
+
+        "${MIXCR}" -Xmx${MIXCR_XMX} exportClones \
+            -f \
+            --drop-default-fields \
+            --chains "${CHAINS}" \
+            --dont-impute-germline-on-export \
+            --not-covered-as-empty \
+            -cloneId \
+            -readCount \
+            -readFraction \
+            -chains \
+            -vGene \
+            -dGene \
+            -jGene \
+            -cGene \
+            -nFeature CDR3 \
+            -aaFeature CDR3 \
+            -nFeature VDJRegion \
+            -aaFeature VDJRegion \
+            -nFeature VRegionTrimmed \
+            -nFeature JRegionTrimmed \
+            -isProductive CDR3 \
+            -isProductive VDJRegion \
+            "${VDJ_CLNS}" \
+            "${OUTPUT}"
+    }
+
+    export_vdj "TR" "${VDJ_TCR}"
+    export_vdj "TRA" "${VDJ_TRA}"
+    export_vdj "TRB" "${VDJ_TRB}"
+
+    mark_done "${STEP10_MARKER}" "${VDJ_TCR}" "${VDJ_TRA}" "${VDJ_TRB}"
+fi
+
+# ============================================================
+# Step 11
+# cloneId correspondence QC
+#
+# 检查 global CLNA 与普通 assembleContigs 后
+# cloneId 对应的 CDR3 是否一致
+# ============================================================
+
+CLONE_ID_QC=${QC_DIR}/${SAMPLE}_cloneId_correspondence_QC.tsv
+CLONE_ID_QC_SUMMARY=${QC_DIR}/${SAMPLE}_cloneId_correspondence_summary.txt
+
+STEP11_MARKER=${CHECKPOINT_DIR}/11_cloneId_QC.done
+
+if step_valid "${STEP11_MARKER}" "${CLONE_ID_QC}" "${CLONE_ID_QC_SUMMARY}"; then
+    echo "[SKIP] Step 11 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 11: validate cloneId correspondence"
+    echo "============================================================"
+
+    python - \
+        "${GLOBAL_TCR}" \
+        "${MAIN_TCR}" \
+        "${CLONE_ID_QC}" \
+        "${CLONE_ID_QC_SUMMARY}" <<'PY'
+
+import sys
+import pandas as pd
+
+global_file, main_file, out_table, out_summary = sys.argv[1:5]
+
+g = pd.read_csv(global_file, sep="\t", low_memory=False)
+m = pd.read_csv(main_file, sep="\t", low_memory=False)
+
+g["cloneId"] = pd.to_numeric(g["cloneId"], errors="coerce").astype("Int64")
+m["cloneId"] = pd.to_numeric(m["cloneId"], errors="coerce").astype("Int64")
+
+g_cols = ["cloneId"]
+m_cols = ["cloneId"]
+
+for c in ["nSeqCDR3", "aaSeqCDR3", "bestVGene", "bestJGene"]:
+    if c in g.columns:
+        g_cols.append(c)
+
+for c in ["nSeqCDR3", "aaSeqCDR3", "bestVGene", "bestJGene"]:
+    if c in m.columns:
+        m_cols.append(c)
+
+g2 = g[g_cols].copy()
+m2 = m[m_cols].copy()
+
+g2 = g2.rename(columns={c: f"{c}_global" for c in g2.columns if c != "cloneId"})
+m2 = m2.rename(columns={c: f"{c}_main" for c in m2.columns if c != "cloneId"})
+
+x = g2.merge(m2, on="cloneId", how="inner")
+
+checks = []
+
+for field in ["nSeqCDR3", "aaSeqCDR3", "bestVGene", "bestJGene"]:
+    a = f"{field}_global"
+    b = f"{field}_main"
+
+    if a in x.columns and b in x.columns:
+        left = x[a].fillna("").astype(str)
+        right = x[b].fillna("").astype(str)
+        x[f"{field}_match"] = left.eq(right)
+        checks.append(f"{field}_match")
+
+if checks:
+    x["all_checked_fields_match"] = x[checks].all(axis=1)
+else:
+    x["all_checked_fields_match"] = True
+
+x.to_csv(out_table, sep="\t", index=False)
+
+n_global = g["cloneId"].nunique()
+n_main = m["cloneId"].nunique()
+n_overlap = x["cloneId"].nunique()
+n_match = int(x["all_checked_fields_match"].sum())
+n_total = len(x)
+
+with open(out_summary, "w") as f:
+    f.write(f"Global cloneIds: {n_global}\n")
+    f.write(f"Main cloneIds: {n_main}\n")
+    f.write(f"Overlapping cloneIds: {n_overlap}\n")
+    f.write(f"Rows checked: {n_total}\n")
+    f.write(f"Fully matched rows: {n_match}\n")
+    f.write(f"Match percent: {n_match / n_total * 100 if n_total else 0:.4f}%\n")
+
+print(f"Global cloneIds: {n_global}")
+print(f"Main cloneIds: {n_main}")
+print(f"Overlapping cloneIds: {n_overlap}")
+print(f"Fully matched: {n_match}/{n_total}")
+PY
+
+    [ $? -eq 0 ] || fail "Step 11 cloneId QC failed"
+
+    mark_done "${STEP11_MARKER}" "${CLONE_ID_QC}" "${CLONE_ID_QC_SUMMARY}"
+fi
+
+# ============================================================
+# Step 12
+# summary
+# ============================================================
+
+SUMMARY=${OUTDIR}/${SAMPLE}_pipeline_summary.txt
+MANIFEST=${OUTDIR}/${SAMPLE}_file_manifest.tsv
+
+STEP12_MARKER=${CHECKPOINT_DIR}/12_summary.done
+
+if step_valid "${STEP12_MARKER}" "${SUMMARY}" "${MANIFEST}"; then
+    echo "[SKIP] Step 12 already completed"
+else
+    echo
+    echo "============================================================"
+    echo "Step 12: summary"
+    echo "============================================================"
+
+    TCR_CLONES=$(tail -n +2 "${MAIN_TCR}" | wc -l)
+    TRA_CLONES=$(tail -n +2 "${MAIN_TRA}" | wc -l)
+    TRB_CLONES=$(tail -n +2 "${MAIN_TRB}" | wc -l)
+
+    VDJ_TCR_ROWS=$(tail -n +2 "${VDJ_TCR}" | wc -l)
+    VDJ_TRA_ROWS=$(tail -n +2 "${VDJ_TRA}" | wc -l)
+    VDJ_TRB_ROWS=$(tail -n +2 "${VDJ_TRB}" | wc -l)
+
+    python - \
+        "${VDJ_TCR}" \
+        "${VDJ_TRA}" \
+        "${VDJ_TRB}" \
+        "${TMP_DIR}/vdj_complete_counts.txt" <<'PY'
+
+import sys
+import pandas as pd
+
+files = {
+    "TCR": sys.argv[1],
+    "TRA": sys.argv[2],
+    "TRB": sys.argv[3],
+}
+
+out = sys.argv[4]
+
+rows = []
+
+for name, path in files.items():
+    df = pd.read_csv(path, sep="\t", low_memory=False)
+
+    if "nSeqVDJRegion" in df.columns:
+        vdj = df["nSeqVDJRegion"].fillna("").astype(str).str.strip()
+        complete = vdj.ne("") & vdj.str.lower().ne("nan")
+        n = int(complete.sum())
+    else:
+        n = 0
+
+    rows.append((name, n))
+
+with open(out, "w") as f:
+    for name, n in rows:
+        f.write(f"{name}\t{n}\n")
+PY
+
+    COMPLETE_TCR=$(awk '$1=="TCR"{print $2}' "${TMP_DIR}/vdj_complete_counts.txt")
+    COMPLETE_TRA=$(awk '$1=="TRA"{print $2}' "${TMP_DIR}/vdj_complete_counts.txt")
+    COMPLETE_TRB=$(awk '$1=="TRB"{print $2}' "${TMP_DIR}/vdj_complete_counts.txt")
+
+    cat > "${SUMMARY}" <<EOF
+MiXCR bulk spatial TCR pipeline summary
+========================================
+
+Sample:
+${SAMPLE}
+
+MAIN TCR
+--------
+
+TCR clonotypes:
+${TCR_CLONES}
+
+TRA clonotypes:
+${TRA_CLONES}
+
+TRB clonotypes:
+${TRB_CLONES}
+
+VDJREGION ASSEMBLY OUTPUT
+-------------------------
+
+TCR rows:
+${VDJ_TCR_ROWS}
+
+TRA rows:
+${VDJ_TRA_ROWS}
+
+TRB rows:
+${VDJ_TRB_ROWS}
+
+ACTUALLY COMPLETE VDJREGION
+---------------------------
+
+TCR complete VDJRegion:
+${COMPLETE_TCR}
+
+TRA complete VDJRegion:
+${COMPLETE_TRA}
+
+TRB complete VDJRegion:
+${COMPLETE_TRB}
+
+ADATA READY
+-----------
+
+Spot × clone:
+${SPOT_TCR_LONG}
+
+Spot summary:
+${SPOT_SUMMARY}
+
+QC
+--
+
+Clone support:
+${CLONE_QC}
+
+Clone support summary:
+${CLONE_QC_SUMMARY}
+
+CloneId correspondence:
+${CLONE_ID_QC}
+
+CloneId correspondence summary:
+${CLONE_ID_QC_SUMMARY}
+EOF
+
+    cat > "${MANIFEST}" <<EOF
+file_type	file_path
+alignments	${ALIGNMENTS}
+clna	${CLNA}
+main_contigs	${MAIN_CLNS}
+global_tcr_clonotypes	${GLOBAL_TCR}
+global_tra_clonotypes	${GLOBAL_TRA}
+global_trb_clonotypes	${GLOBAL_TRB}
+main_tcr_clones	${MAIN_TCR}
+main_tra_clones	${MAIN_TRA}
+main_trb_clones	${MAIN_TRB}
+read_to_barcode_umi	${READ_BARCODE_TABLE}
+read_to_clone	${READ_CLONE_TABLE}
+spot_clone_counts	${SPOT_CLONE_COUNTS}
+spot_tcr_long	${SPOT_TCR_LONG}
+spot_tcr_summary	${SPOT_SUMMARY}
+clone_support_qc	${CLONE_QC}
+clone_support_summary	${CLONE_QC_SUMMARY}
+cloneid_correspondence_qc	${CLONE_ID_QC}
+cloneid_correspondence_summary	${CLONE_ID_QC_SUMMARY}
+vdjregion_clns	${VDJ_CLNS}
+vdjregion_tcr	${VDJ_TCR}
+vdjregion_tra	${VDJ_TRA}
+vdjregion_trb	${VDJ_TRB}
+EOF
+
+    rm -f "${TMP_DIR}/vdj_complete_counts.txt"
+
+    mark_done "${STEP12_MARKER}" "${SUMMARY}" "${MANIFEST}"
+fi
+
+echo
+echo "============================================================"
+echo "TCR bulk pipeline completed"
+echo "Sample: ${SAMPLE}"
+echo "Finished: $(date)"
+echo
+echo "adata-ready:"
+echo "${SPOT_SUMMARY}"
+echo
+echo "Main TCR:"
+echo "${MAIN_TCR}"
+echo
+echo "TRA:"
+echo "${MAIN_TRA}"
+echo
+echo "TRB:"
+echo "${MAIN_TRB}"
+echo
+echo "VDJRegion TCR:"
+echo "${VDJ_TCR}"
+echo
+echo "VDJRegion TRA:"
+echo "${VDJ_TRA}"
+echo
+echo "VDJRegion TRB:"
+echo "${VDJ_TRB}"
+echo
+echo "Summary:"
+echo "${SUMMARY}"
+echo "============================================================"

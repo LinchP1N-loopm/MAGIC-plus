@@ -1,0 +1,173 @@
+#!/bin/bash
+#PBS -N RegTools_G23-4
+#PBS -l nodes=1:ppn=32
+#PBS -l walltime=1200:00:00
+#PBS -q gold
+
+source ~/.bashrc
+
+#############################################
+# 用户配置
+#############################################
+
+THREADS=32
+
+REGTOOLS=/path/to/project/regtools/build/regtools
+
+BAM=/path/to/project/magic/sample20260618_snv加测/data/result_STARsolo/G23-4/STARsolo_pe/G23-4_Aligned_AB.sortedByCoord.out.bam
+
+VCF=/path/to/project/magic/fig4/run_monopogen/G23-4_20260618加测/G23-4_Monopogen_filtered_noRNAediting.vcf
+
+GTF=/path/to/project/database/ref_hg38_v32_release98/hg38.gtf
+
+FASTA=/path/to/project/database/ref_hg38_v32_release98/hg38.fa
+
+OUTDIR=/path/to/project/magic/fig4/run_monopogen/G23-4_20260618加测/regtools
+
+#############################################
+# 初始化
+#############################################
+
+mkdir -p "${OUTDIR}"
+cd "${OUTDIR}"
+
+exec > >(tee -i regtools_G23-4.log)
+exec 2>&1
+
+echo "======================================"
+echo "RegTools spatial splice analysis"
+echo "Sample: G23-4"
+echo "Date: $(date)"
+echo "======================================"
+
+#############################################
+# 检查软件和输入
+#############################################
+
+echo "======================================"
+echo "Check software and inputs"
+echo "======================================"
+
+if [ ! -x "${REGTOOLS}" ]; then
+    echo "ERROR: RegTools not found: ${REGTOOLS}"
+    exit 1
+fi
+
+for FILE in "${BAM}" "${VCF}" "${GTF}" "${FASTA}"
+do
+    if [ ! -f "${FILE}" ]; then
+        echo "ERROR: missing file: ${FILE}"
+        exit 1
+    fi
+done
+
+"${REGTOOLS}" --version
+
+echo "Input files OK"
+
+#############################################
+# Step1 提取全样本splice junction
+#############################################
+
+echo "======================================"
+echo "Step1: Extract splice junctions"
+echo "======================================"
+
+"${REGTOOLS}" junctions extract \
+    -a 8 \
+    -m 50 \
+    -M 500000 \
+    -s FR \
+    -o G23-4_junctions.bed \
+    "${BAM}"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: junction extraction failed"
+    exit 1
+fi
+
+echo "Junction number:"
+wc -l G23-4_junctions.bed
+
+#############################################
+# Step2 junction注释
+#############################################
+
+echo "======================================"
+echo "Step2: Annotate junctions"
+echo "======================================"
+
+"${REGTOOLS}" junctions annotate \
+    -o G23-4_junctions_annotated.bed \
+    G23-4_junctions.bed \
+    "${FASTA}" \
+    "${GTF}"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: junction annotation failed"
+    exit 1
+fi
+
+echo "Annotated junction number:"
+wc -l G23-4_junctions_annotated.bed
+
+#############################################
+# Step3 SNV-splicing关联 + barcode输出
+#############################################
+
+echo "======================================"
+echo "Step3: Identify splice associated variants"
+echo "======================================"
+
+"${REGTOOLS}" cis-splice-effects identify \
+    -s FR \
+    -a 8 \
+    -m 50 \
+    -M 500000 \
+    -o G23-4_splice_effects.tsv \
+    -v G23-4_splice_relevant_variants.vcf \
+    -j G23-4_splice_effects_junctions.bed \
+    -b G23-4_splice_effects_barcodes.tsv \
+    "${VCF}" \
+    "${BAM}" \
+    "${FASTA}" \
+    "${GTF}"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: cis-splice-effects failed"
+    exit 1
+fi
+
+#############################################
+# 输出统计
+#############################################
+
+echo "======================================"
+echo "RegTools finished"
+echo "======================================"
+
+echo "Main splice-effect table:"
+wc -l G23-4_splice_effects.tsv
+
+echo "Barcode table:"
+wc -l G23-4_splice_effects_barcodes.tsv
+
+echo "Junction BED:"
+wc -l G23-4_splice_effects_junctions.bed
+
+echo "Splice-relevant VCF:"
+grep -vc '^#' G23-4_splice_relevant_variants.vcf || true
+
+echo "======================================"
+echo "Output files"
+echo "======================================"
+
+ls -lh \
+    G23-4_junctions.bed \
+    G23-4_junctions_annotated.bed \
+    G23-4_splice_effects.tsv \
+    G23-4_splice_effects_barcodes.tsv \
+    G23-4_splice_effects_junctions.bed \
+    G23-4_splice_relevant_variants.vcf
+
+echo "Done: $(date)"

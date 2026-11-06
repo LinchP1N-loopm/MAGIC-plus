@@ -1,0 +1,17 @@
+#!/bin/bash
+#PBS -N MAGIC-seq-TES
+#PBS -j oe
+#PBS -d /path/to/project/20260421_TSSs/qsub
+#PBS -l nodes=1:ppn=10
+#PBS -l walltime=72:00:00
+#PBS -q gold
+
+eval "$(micromamba shell hook --shell bash)"
+micromamba activate biotools
+
+computeMatrix reference-point \
+ -S /path/to/project/G_Ns_analysis/plot_genometracks/Figure1_F/bigwig_data/MAGIC-seq.bw \
+ -R /path/to/project/gene-database/ref_TSS-TES/mm10_FANTOM5_TES_labeled.bed \
+ --referencePoint TES \
+ -a 4000 -b 4000 \
+ -out /path/to/project/20260421_TSSs/result/MAGIC-seq-new/matrix_TES_4k.tab.gz

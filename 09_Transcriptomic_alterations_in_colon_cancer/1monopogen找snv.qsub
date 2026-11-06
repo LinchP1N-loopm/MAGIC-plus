@@ -1,0 +1,38 @@
+#!/bin/bash
+#PBS -N mono_whole234
+#PBS -l nodes=1:ppn=22
+#PBS -l walltime=96:00:00
+#PBS -q gold
+
+cd /path/to/project/magic/fig4/run_monopogen/G23-4_20260618加测
+
+source ~/.bashrc
+conda activate /path/to/project/anaconda3/envs/monopogen
+
+export MONOPATH=/path/to/project/magic/Monopogen
+export LD_LIBRARY_PATH=$MONOPATH/apps:$LD_LIBRARY_PATH
+
+python $MONOPATH/src/Monopogen.py preProcess \
+-b bam.lst \
+-o bm \
+-a $MONOPATH/apps \
+-t 22
+
+python $MONOPATH/src/Monopogen.py  germline  -a $MONOPATH/apps/  -r GRCh38.region.lst \
+ -p /path/to/project/magic/monopogen_phased_panel/ \
+ -g /path/to/project/database/ref_hg38_v32_release98/hg38.fa  -m 3 -s all  -o ./bm -t 22
+
+
+python  $MONOPATH/src/Monopogen.py  somatic  \
+    -a   $MONOPATH/apps  -r  GRCh38.region.lst  -t 22 \
+    -i  bm  -l  mono_somatic_barcode_cellid_G23-4_all.csv   -s featureInfo     \
+    -g  /path/to/project/database/ref_hg38_v32_release98/hg38.fa
+
+python  $MONOPATH/src/Monopogen.py  somatic  \
+    -a   $MONOPATH/apps  -r  GRCh38.region.lst  -t 22  \
+    -i  bm  -l  mono_somatic_barcode_cellid_G23-4_all.csv   -s cellScan     \
+    -g   /path/to/project/database/ref_hg38_v32_release98/hg38.fa
+python  $MONOPATH/src/Monopogen.py  somatic  \
+    -a   $MONOPATH/apps  -r  GRCh38.region.lst  -t 22 \
+    -i  bm  -l  mono_somatic_barcode_cellid_G23-4_all.csv   -s LDrefinement     \
+    -g   /path/to/project/database/ref_hg38_v32_release98/hg38.fa

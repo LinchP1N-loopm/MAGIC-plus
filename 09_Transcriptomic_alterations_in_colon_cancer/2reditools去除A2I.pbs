@@ -1,0 +1,58 @@
+#!/bin/bash
+#PBS -N REDI_known_G234
+#PBS -l nodes=1:ppn=16
+#PBS -l walltime=1200:00:00
+#PBS -q gold
+
+
+cd /path/to/project/magic/fig4/run_A2I
+
+
+source ~/.bashrc
+
+conda activate reditools
+
+
+# ==========================
+# 软件
+# ==========================
+
+REDITools=/path/to/project/REDItools/main/REDItoolKnown.py
+
+
+# ==========================
+# 输入
+# ==========================
+
+BAM=/path/to/project/magic/sample20260618_snv加测/data/result_STARsolo/G23-4/STARsolo_pe/G23-4_Aligned_AB.sortedByCoord.out.bam
+
+
+FASTA=/path/to/project/database/ref_hg38_v32_release98/hg38.fa
+
+
+# REDIportal下载整理后的known editing
+EDIT=/path/to/project/magic/fig4/run_A2I/rna_editing_ref/REDIportal_hg38_known.tab.gz
+
+OUTDIR=G23-4_REDI_known
+
+mkdir -p ${OUTDIR}
+
+
+
+# ==========================
+# run
+# ==========================
+
+python ${REDITools} \
+-i ${BAM} \
+-f ${FASTA} \
+-l ${EDIT} \
+-o ${OUTDIR} \
+-t 16 \
+-q 25 \
+-m 10 \
+-v 1
+
+
+
+echo "REDItools finished"

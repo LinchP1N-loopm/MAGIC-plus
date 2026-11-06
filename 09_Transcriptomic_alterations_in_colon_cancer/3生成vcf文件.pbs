@@ -1,0 +1,264 @@
+#!/bin/bash
+#PBS -N monopogen_vcf_234
+#PBS -l nodes=1:ppn=2
+#PBS -l walltime=96:00:00
+#PBS -q gold
+
+
+cd /path/to/project/magic/fig4/run_monopogen/G23-4_20260618加测
+
+source ~/.bashrc
+conda activate magic
+
+
+python << 'PYTHON_SCRIPT'
+
+from pathlib import Path
+import pandas as pd
+
+
+# ==============================
+# 路径修改
+# ==============================
+
+monopogen_dir = Path(
+    "/path/to/project/magic/fig4/run_monopogen/G23-4_20260618加测/bm/somatic"
+)
+
+redi_file = Path(
+    "/path/to/project/magic/fig4/run_A2I/G23-4_REDI_known/outTable_G23-4"
+)
+
+prefix = "G23-4_Monopogen"
+
+
+# ==============================
+# 1. 合并 Monopogen结果
+# ==============================
+
+print("Reading Monopogen...")
+
+
+all_snv = []
+
+for f in sorted(monopogen_dir.glob("chr*.putativeSNVs.csv")):
+
+    print("Loading:", f.name)
+
+    df = pd.read_csv(f)
+    all_snv.append(df)
+
+
+snv = pd.concat(
+    all_snv,
+    ignore_index=True
+)
+
+
+print("Raw SNVs:", len(snv))
+
+
+# ==============================
+# 2. 按你的逻辑过滤
+# ==============================
+
+for c in [
+    "SVM_pos_score",
+    "Depth_ref",
+    "Depth_alt",
+    "Depth_total"
+]:
+    if c in snv.columns:
+        snv[c] = pd.to_numeric(
+            snv[c],
+            errors="coerce"
+        )
+
+
+snv = snv[
+    (snv["SVM_pos_score"] > 0.1)
+    &
+    (snv["Depth_ref"] > 10)
+    &
+    (snv["Depth_alt"] > 10)
+].copy()
+
+
+# 去重
+snv["snv_id"] = (
+    snv["chr"].astype(str)
+    + ":"
+    + snv["pos"].astype(str)
+    + ":"
+    + snv["Ref_allele"].astype(str)
+    + ":"
+    + snv["Alt_allele"].astype(str)
+)
+
+
+snv = (
+    snv
+    .drop_duplicates("snv_id")
+    .copy()
+)
+
+
+print(
+    "After Monopogen filter:",
+    len(snv)
+)
+
+
+# ==============================
+# VCF写出函数
+# ==============================
+
+def write_vcf(df, outfile):
+
+    with open(outfile, "w") as out:
+
+        out.write("##fileformat=VCFv4.2\n")
+        out.write("##source=Monopogen\n")
+        out.write(
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+        )
+
+
+        for _,r in df.iterrows():
+
+            info = (
+                f"SVM={r['SVM_pos_score']};"
+                f"DP={r.get('Depth_total','.')};"
+                f"DP_REF={r['Depth_ref']};"
+                f"DP_ALT={r['Depth_alt']}"
+            )
+
+            out.write(
+                f"{r['chr']}\t"
+                f"{r['pos']}\t"
+                f"{r['snv_id']}\t"
+                f"{r['Ref_allele']}\t"
+                f"{r['Alt_allele']}\t"
+                f".\tPASS\t"
+                f"{info}\n"
+            )
+
+
+    print("Written:", outfile)
+
+
+
+# ==============================
+# 3. 输出过滤前VCF
+# ==============================
+
+raw_vcf = prefix + "_filtered.vcf"
+
+write_vcf(
+    snv,
+    raw_vcf
+)
+
+
+# ==============================
+# 4. 读取REDItools结果
+# ==============================
+
+print("Reading REDItools...")
+
+
+redi = pd.read_csv(
+    redi_file,
+    sep="\t",
+    comment="#"
+)
+
+
+print(
+    redi.columns.tolist()
+)
+
+
+if "Region" in redi.columns:
+    redi_chr = redi["Region"]
+elif "Chromosome" in redi.columns:
+    redi_chr = redi["Chromosome"]
+else:
+    raise Exception(
+        "Cannot find chromosome column"
+    )
+
+
+if "Position" in redi.columns:
+    redi_pos = redi["Position"]
+elif "pos" in redi.columns:
+    redi_pos = redi["pos"]
+else:
+    raise Exception(
+        "Cannot find position column"
+    )
+
+
+editing_sites = set(
+    zip(
+        redi_chr.astype(str),
+        redi_pos.astype(int)
+    )
+)
+
+
+print(
+    "Known RNA editing sites:",
+    len(editing_sites)
+)
+
+
+# ==============================
+# 5. 去除A-to-I editing
+# ==============================
+
+snv["is_RNA_editing"] = [
+    (str(c),int(p)) in editing_sites
+    for c,p in zip(
+        snv["chr"],
+        snv["pos"]
+    )
+]
+
+
+print(
+    "Removed RNA editing:",
+    snv["is_RNA_editing"].sum()
+)
+
+
+snv_final = snv[
+    ~snv["is_RNA_editing"]
+].copy()
+
+
+# ==============================
+# 6. 输出最终VCF
+# ==============================
+
+final_vcf = prefix + "_filtered_noRNAediting.vcf"
+
+
+write_vcf(
+    snv_final,
+    final_vcf
+)
+
+
+print("======================")
+print("Final summary")
+print("======================")
+print("Before RNA editing removal:", len(snv))
+print("After RNA editing removal:", len(snv_final))
+print("Removed:", len(snv)-len(snv_final))
+
+
+PYTHON_SCRIPT
+
+
+echo "Finished"
